@@ -1,135 +1,57 @@
-# PS5 Buddy installer (friend side, Windows 10/11)
-# Installs Tailscale + chiaki-ng, joins the host's tailnet, adds a "PS5 Buddy" desktop shortcut.
+# PS5 Buddy 2 installer (Windows 10/11)
+# Installs PS5Upload (it has Tailscale built in, nothing else needed) + the PS5 Buddy app.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
 
-$here    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$appDir  = Join-Path $env:LOCALAPPDATA 'PS5Buddy'
-$tsExe   = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+$here   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$appDir = Join-Path $env:LOCALAPPDATA 'PS5Buddy'
 New-Item -ItemType Directory -Force -Path $appDir | Out-Null
+function Step($m) { Write-Host ''; Write-Host "==> $m" -ForegroundColor Cyan }
+function Ok($m)   { Write-Host "    $m" -ForegroundColor Green }
+function Warn($m) { Write-Host "    $m" -ForegroundColor Yellow }
 
-function Step($msg) { Write-Host ''; Write-Host "==> $msg" -ForegroundColor Cyan }
-function Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
-function Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
+Write-Host '========================================' -ForegroundColor Magenta
+Write-Host '  PS5 Buddy 2 - PS5Upload + Tailscale   ' -ForegroundColor Magenta
+Write-Host '========================================' -ForegroundColor Magenta
 
-function Read-Ini($path) {
-  $h = @{}
-  foreach ($line in Get-Content $path) {
-    if ($line -match '^\s*([A-Z_]+)\s*=\s*(.*?)\s*$') { $h[$matches[1]] = $matches[2] }
-  }
-  return $h
+function Find-PS5Upload {
+  Get-ChildItem "$env:LOCALAPPDATA\PS5Upload","$env:LOCALAPPDATA\Programs","$env:ProgramFiles\PS5Upload","$appDir\PS5Upload" `
+    -Recurse -Filter 'PS5Upload.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
 }
-$cfg = Read-Ini (Join-Path $here 'buddy.ini')
 
-Write-Host '=====================================' -ForegroundColor Magenta
-Write-Host '   PS5 Buddy - low-lag Remote Play   ' -ForegroundColor Magenta
-Write-Host '=====================================' -ForegroundColor Magenta
-
-# ---------- 1. Tailscale ----------
-Step 'Installing Tailscale'
-if (Test-Path $tsExe) {
-  Ok 'Tailscale already installed.'
-} else {
-  $done = $false
-  if (Get-Command winget -ErrorAction SilentlyContinue) {
-    try {
-      winget install --id Tailscale.Tailscale -e --silent --accept-package-agreements --accept-source-agreements | Out-Host
-      if (Test-Path $tsExe) { $done = $true }
-    } catch { Warn 'winget failed, downloading directly instead.' }
+# ---------- 1. PS5Upload ----------
+Step 'Installing PS5Upload (with built-in Tailscale)'
+$exe = Find-PS5Upload
+if ($exe) { Ok "Already installed: $($exe.FullName)" }
+else {
+  $rel = Invoke-RestMethod 'https://api.github.com/repos/phantomptr/ps5upload/releases/latest' -Headers @{ 'User-Agent' = 'ps5-buddy' }
+  $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+  $setup = $rel.assets | Where-Object { $_.name -match "win-$arch-setup\.exe$" } | Select-Object -First 1
+  $zip   = $rel.assets | Where-Object { $_.name -match "win-$arch\.zip$" } | Select-Object -First 1
+  if ($setup) {
+    $p = Join-Path $env:TEMP $setup.name
+    Write-Host "    Downloading $($setup.name) ($($rel.tag_name))"
+    Invoke-WebRequest $setup.browser_download_url -OutFile $p
+    Start-Process $p -ArgumentList '/S' -Wait
+    $exe = Find-PS5Upload
   }
-  if (-not $done) {
-    $msi = Join-Path $env:TEMP 'tailscale-setup.msi'
-    Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi
-    Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart" -Wait
+  if (-not $exe -and $zip) {
+    Warn 'Installer did not finish quietly - using the portable version.'
+    $p = Join-Path $env:TEMP $zip.name
+    Invoke-WebRequest $zip.browser_download_url -OutFile $p
+    Expand-Archive $p -DestinationPath (Join-Path $appDir 'PS5Upload') -Force
+    $exe = Find-PS5Upload
   }
-  if (-not (Test-Path $tsExe)) { throw 'Tailscale did not install. Install it from tailscale.com/download and run this again.' }
-  Ok 'Tailscale installed.'
+  if (-not $exe) { throw 'PS5Upload did not install. Get it from github.com/phantomptr/ps5upload/releases and run this again.' }
+  Unblock-File $exe.FullName -ErrorAction SilentlyContinue
+  Ok "PS5Upload installed: $($exe.FullName)"
 }
-Start-Service Tailscale -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 3
 
-# ---------- 2. chiaki-ng (Remote Play client) ----------
-Step 'Installing chiaki-ng (PS5 Remote Play app)'
-$chiakiDir = Join-Path $appDir 'chiaki-ng'
-$chiakiExe = Get-ChildItem $chiakiDir -Recurse -Include 'chiaki-ng.exe','chiaki.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($chiakiExe) {
-  Ok 'chiaki-ng already installed.'
-} else {
-  $rel = Invoke-RestMethod 'https://api.github.com/repos/streetpea/chiaki-ng/releases/latest' -Headers @{ 'User-Agent' = 'ps5-buddy' }
-  $zip = $rel.assets | Where-Object { $_.name -match '(?i)win' -and $_.name -match '(?i)\.zip$' } | Select-Object -First 1
-  if ($zip) {
-    $zipPath = Join-Path $env:TEMP $zip.name
-    Write-Host "    Downloading $($zip.name) ($($rel.tag_name))"
-    Invoke-WebRequest $zip.browser_download_url -OutFile $zipPath
-    if (Test-Path $chiakiDir) { Remove-Item $chiakiDir -Recurse -Force }
-    Expand-Archive $zipPath -DestinationPath $chiakiDir -Force
-    $chiakiExe = Get-ChildItem $chiakiDir -Recurse -Include 'chiaki-ng.exe','chiaki.exe' | Select-Object -First 1
-  } else {
-    $inst = $rel.assets | Where-Object { $_.name -match '(?i)win' -and $_.name -match '(?i)\.exe$' } | Select-Object -First 1
-    if (-not $inst) { throw 'Could not find a Windows build of chiaki-ng. Get it from github.com/streetpea/chiaki-ng/releases' }
-    $instPath = Join-Path $env:TEMP $inst.name
-    Invoke-WebRequest $inst.browser_download_url -OutFile $instPath
-    Warn 'Running the chiaki-ng installer - click through it.'
-    Start-Process $instPath -Wait
-    $chiakiExe = Get-ChildItem "$env:ProgramFiles","${env:ProgramFiles(x86)}","$env:LOCALAPPDATA\Programs" -Recurse -Include 'chiaki-ng.exe','chiaki.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-  }
-  if (-not $chiakiExe) { throw 'chiaki-ng did not install.' }
-  Ok "chiaki-ng installed: $($chiakiExe.FullName)"
-}
-Set-Content (Join-Path $appDir 'chiaki-path.txt') $chiakiExe.FullName
-
-# ---------- 3. Join the host's tailnet ----------
-Step 'Connecting to the host''s private network'
-$ver = & $tsExe status --json | Out-String
-$state = ''
-try { $state = ($ver | ConvertFrom-Json).BackendState } catch {}
-if ($state -eq 'Running') {
-  & $tsExe set --accept-routes=true --unattended=true | Out-Null
-  Ok 'Already connected - turned on PS5 route.'
-} elseif ($cfg['AUTHKEY']) {
-  & $tsExe up --accept-routes --unattended "--hostname=ps5-buddy-$($env:COMPUTERNAME.ToLower())" "--authkey=$($cfg['AUTHKEY'])" | Out-Host
-  Ok 'Joined with the host''s invite key.'
-} else {
-  Warn 'A browser window will open - log in with the account the host invited.'
-  $log  = Join-Path $env:TEMP 'ps5buddy-up.err.log'
-  $log2 = Join-Path $env:TEMP 'ps5buddy-up.out.log'
-  Remove-Item $log,$log2 -ErrorAction SilentlyContinue
-  $p = Start-Process $tsExe -ArgumentList 'up','--accept-routes','--unattended' -RedirectStandardError $log -RedirectStandardOutput $log2 -PassThru -WindowStyle Hidden
-  $opened = $false
-  while (-not $p.HasExited) {
-    Start-Sleep -Milliseconds 500
-    if (-not $opened) {
-      $m = Select-String -Path $log,$log2 -Pattern 'https://login\.tailscale\.com/\S+' -ErrorAction SilentlyContinue | Select-Object -First 1
-      if ($m) { Start-Process $m.Matches[0].Value; $opened = $true }
-    }
-  }
-}
-Start-Sleep -Seconds 2
-$st = & $tsExe status --json | ConvertFrom-Json
-if ($st.BackendState -ne 'Running') { throw 'Tailscale is not connected. Run Install.bat again.' }
-Ok "Connected as $($st.Self.HostName) ($($st.Self.TailscaleIPs[0]))"
-
-# ---------- 4. Low-lag Windows tweaks (all safe, all reversible) ----------
-Step 'Applying low-lag network tweaks'
-# Keep Windows from throttling network for media/background
-$mm = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
-Set-ItemProperty $mm -Name NetworkThrottlingIndex -Value 0xffffffff -Type DWord
-Set-ItemProperty $mm -Name SystemResponsiveness -Value 10 -Type DWord
-# High-priority QoS tag on chiaki-ng's traffic (helps on routers that honor DSCP)
-Remove-NetQosPolicy -Name 'PS5Buddy' -Confirm:$false -ErrorAction SilentlyContinue
-New-NetQosPolicy -Name 'PS5Buddy' -AppPathNameMatchCondition (Split-Path $chiakiExe.FullName -Leaf) -DSCPAction 46 -NetworkProfile All | Out-Null
-# Let chiaki-ng through the firewall (stream comes back as UDP)
-Remove-NetFirewallRule -DisplayName 'PS5 Buddy chiaki-ng' -ErrorAction SilentlyContinue
-New-NetFirewallRule -DisplayName 'PS5 Buddy chiaki-ng' -Direction Inbound -Program $chiakiExe.FullName -Action Allow | Out-Null
-# Prefer the High performance power plan while plugged in (stops CPU/NIC napping)
-cmd /c "powercfg /setactive SCHEME_MIN >nul 2>nul"
-Ok 'Done (network throttling off, traffic priority, firewall rule, high-performance power).'
-
-# ---------- 5. App + shortcuts ----------
-Step 'Installing the PS5 Buddy app'
-foreach ($f in 'gui.ps1','play.ps1','buddy.ini','uninstall.ps1') { Copy-Item (Join-Path $here $f) $appDir -Force }
-# elevating uninstaller for Settings > Apps
+# ---------- 2. PS5 Buddy app ----------
+Step 'Installing PS5 Buddy'
+foreach ($f in 'gui.ps1','uninstall.ps1') { Copy-Item (Join-Path $here $f) $appDir -Force }
+@{ ps5=''; upload_mbps=0; ps5upload_exe=$exe.FullName; auto_lower=$true } | ConvertTo-Json | Set-Content (Join-Path $appDir 'settings.json')
 Set-Content (Join-Path $appDir 'uninstall.cmd') -Encoding Ascii -Value @(
   '@echo off', 'net session >nul 2>&1 || (powershell -NoProfile -Command "Start-Process -FilePath ''%~f0'' -Verb RunAs" & exit /b)',
   'copy /y "%~dp0uninstall.ps1" "%TEMP%\ps5buddy-uninstall.ps1" >nul',
@@ -139,25 +61,24 @@ function New-AdminShortcut($path) {
   $lnk = $ws.CreateShortcut($path)
   $lnk.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
   $lnk.Arguments  = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$appDir\gui.ps1`""
-  $lnk.IconLocation = $chiakiExe.FullName
+  $lnk.IconLocation = $exe.FullName
   $lnk.WorkingDirectory = $appDir
-  $lnk.Description = 'PS5 Buddy - low-lag PS5 Remote Play over Tailscale'
+  $lnk.Description = 'PS5 Buddy - low-lag PS5Upload Play over Tailscale'
   $lnk.Save()
-  # flag the shortcut "Run as administrator" (byte 0x15, bit 0x20) - needed for Tailscale + QoS
+  # "Run as administrator" flag (byte 0x15, bit 0x20): Speed boost needs it
   $b = [IO.File]::ReadAllBytes($path); $b[0x15] = $b[0x15] -bor 0x20; [IO.File]::WriteAllBytes($path, $b)
 }
 New-AdminShortcut (Join-Path ([Environment]::GetFolderPath('Desktop')) 'PS5 Buddy.lnk')
 New-AdminShortcut (Join-Path ([Environment]::GetFolderPath('Programs')) 'PS5 Buddy.lnk')
-# show up in Settings > Apps so it can be uninstalled normally
 $u = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PS5Buddy'
 New-Item $u -Force | Out-Null
 Set-ItemProperty $u -Name DisplayName -Value 'PS5 Buddy'
-Set-ItemProperty $u -Name DisplayVersion -Value '1.0.0'
+Set-ItemProperty $u -Name DisplayVersion -Value '2.0.0'
 Set-ItemProperty $u -Name Publisher -Value 'PS5 Buddy'
-Set-ItemProperty $u -Name DisplayIcon -Value $chiakiExe.FullName
+Set-ItemProperty $u -Name DisplayIcon -Value $exe.FullName
 Set-ItemProperty $u -Name UninstallString -Value "`"$appDir\uninstall.cmd`""
-Ok 'App installed (desktop + Start menu).'
+Ok 'Desktop + Start menu shortcuts made.'
 
 Write-Host ''
-Write-Host 'All set! Opening PS5 Buddy...' -ForegroundColor Green
+Write-Host 'All set! Opening PS5 Buddy (it starts PS5Upload too)...' -ForegroundColor Green
 Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',"`"$appDir\gui.ps1`""

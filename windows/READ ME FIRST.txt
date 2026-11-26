@@ -1,25 +1,28 @@
-PS5 BUDDY - low-lag PS5 Remote Play with a friend over Tailscale
-=================================================================
+PS5 BUDDY 2 - low-lag PS5 play with a friend, PS5Upload + Tailscale
+=====================================================================
+For a jailbroken PS5 running the PS5Upload helper. The PS5 is on Tailscale
+itself, so the game stream goes straight from the PS5's upload to you.
 
 INSTALL (once)
-  1. Unzip this folder anywhere.
-  2. Double-click Install.bat and click "Yes".
-     It installs Tailscale + chiaki-ng (PS5 Remote Play) and the PS5 Buddy app
-     (desktop + Start menu), then opens the app.
+  Unzip, double-click Install.bat, click "Yes".
+  It installs PS5Upload (Tailscale built in) and PS5 Buddy, then opens it.
 
-FRIEND (you play the host's PS5)  -> "Play" tab
-  1. Paste the invite code the host sent you > "Use invite".
-  2. "Connect" (log in if a browser opens) > "Test line".
-  3. Set the shown quality in chiaki-ng > Settings > Video, then "PLAY".
-     First time in chiaki-ng: + > add the PS5 address, Register with the
-     8-digit PIN the host reads from PS5 Settings > System > Remote Play > Link Device.
-  The app keeps watching the line and dings when you should change quality.
+FRIEND -> "Play" tab
+  1. Turn on Tailscale  (sign in with the account the host invited)
+  2. Paste the host's invite code > Use invite
+  3. Test line  -> shows the best quality your line + the host's upload can hold
+  4. PLAY  -> starts PS5Upload at exactly that quality; watch/play it in
+     PS5Upload > Play. "Auto-lower on stutter" steps the quality down by
+     itself if the stream keeps losing packets.
+  First time only: PS5Upload > Play > Set up (pairing, PIN from the PS5).
+  Speed boost: top priority for PS5Upload's traffic on your PC.
 
-HOST (the PS5 is at your house)  -> "Host" tab
-  1. Find PS5   2. Measure upload   3. Share PS5 on Tailscale + Speed boost
-  4. Copy invite (send it to your friend)   5. Watch your friend's line
+HOST -> "Host" tab
+  1. Check: PS5 on Tailscale? (PS5Upload > Connection > PS5 card > Put this PS5 on Tailscale)
+  2. Measure your upload (the PS5 sends the stream on it)
+  3. Copy invite code -> send it; also PS5Upload > Connection > Invite a device
+  4. Playing together on one stream instead? Start Play + Play Together in
+     PS5Upload and tick "Watch guests" to see each guest's ping.
 
-LEAST LAG: ethernet on the PS5 and both PCs, USB controller, forward UDP 41641
-on the host's router to the host PC.
-
-Remove everything: Uninstall.bat (or Settings > Apps > PS5 Buddy)
+LEAST LAG: PS5 on ethernet, both PCs on ethernet, USB controller.
+Remove: Uninstall.bat (or Settings > Apps > PS5 Buddy)

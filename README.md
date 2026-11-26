@@ -1,48 +1,43 @@
-# PS5 Buddy
+# PS5 Buddy 2
 
-Low-lag PS5 Remote Play with a friend over a private Tailscale network.
+Low-lag PS5 play with a friend, using **[PS5Upload](https://github.com/phantomptr/ps5upload)'s
+built-in Tailscale** on a jailbroken PS5.
 
-A PS5 can't run Tailscale, so the host's PC joins Tailscale **for** it and
-routes only the PS5's address to the friend. The video still comes from the PS5
-and leaves on the house upload. PS5 Buddy makes that path as fast as possible
-and picks the best stream quality the line can hold.
+The PS5 itself joins your Tailscale network (PS5Upload helper), so the game stream goes
+**straight from the PS5's upload** to your friend: no PC in the middle, no port forwarding.
+PS5 Buddy drives the PS5Upload engine on the player's computer (`http://127.0.0.1:19113`)
+to get the most out of that link.
 
 | Part | What it does |
 |---|---|
-| **Connection** | PS5 shared as a `/32` Tailscale subnet route, pinned UDP 41641 for direct links, firewall/ACL opened only for Remote Play ports |
-| **Acceleration** | Stream marked top priority (DSCP EF), no Windows network throttling, high-performance power. Linux host also gets a CAKE queue on the uplink and UDP GRO forwarding |
-| **Algorithm** | Measures ping, jitter, loss, relay vs direct and the host's upload; picks a tier (1080p60 15 Mbps down to 540p60 3 Mbps) capped at 60% of upload; re-checks live and only switches after the change holds. Linux host: latency-based autorate steers CAKE's limit in real time |
+| **Connection** | Turns on PS5Upload's Tailscale, adds the host's PS5 from an invite code, shows the path (direct / relayed / home), the latency, and whether the PS5 is wired or on Wi-Fi |
+| **Algorithm** | Measures Tailscale latency and jitter to the PS5 and caps the stream at 60% of the house upload. It picks the best tier, from 1080p60 15 Mbps H.265 down to 720p30 3 Mbps H.264, and **starts PS5Upload Play at exactly that quality**. While you play it reads the stream's packet losses and **steps down a tier** after two 10-second windows with losses. It never raises the quality by itself, because a restart interrupts play |
+| **Acceleration** | PS5Upload traffic gets top priority (DSCP EF), Windows network throttling is turned off, the power plan is set to High performance and the firewall is opened for direct Tailscale links. It also flags Wi-Fi on the PS5 or the PC and relayed links |
 
-## Windows (friend and/or host): GUI app
+## Windows: one-click install
 
-`windows/` is the install package. Zip it or build it with
-`./make-buddy-pack.sh --ps5 <PS5 IP>` → `dist/PS5-Buddy-Windows.zip`.
+Download `PS5-Buddy-Windows.zip` from [Releases](../../releases), unzip it and double-click
+**Install.bat**. It installs PS5Upload, which already includes Tailscale, plus the PS5 Buddy app,
+with shortcuts on the desktop and in the Start menu. To remove it, use Settings > Apps.
 
-Double-click **Install.bat** → installs Tailscale, chiaki-ng and the PS5 Buddy
-app (desktop + Start menu, uninstall from Settings > Apps).
+- **Play tab (friend):** Turn on Tailscale → Use invite → Test line → **PLAY**. It shows a live latency graph and has an "Auto-lower on stutter" option.
+- **Host tab:** checks that the PS5 is on Tailscale and whether it's wired, measures your upload, copies the invite code, and shows each Play Together guest's ping.
 
-- **Play tab** — paste the host's invite code, Connect, Test line, PLAY. Live ping graph + quality advice.
-- **Host tab** — find PS5, measure upload, share PS5 on Tailscale, speed boost, copy invite, watch the friend's line (bufferbloat warning).
+## Linux / macOS: `ps5u_buddy.py`
 
-The app is PowerShell + WinForms, so it runs on any Windows 10/11 with nothing extra.
-
-## Linux host: `ps5buddy.py`
+Uses the same engine API, with no dependencies:
 
 ```
-ps5buddy find                        # find the PS5 on the LAN
-sudo ps5buddy setup --ps5 <IP>       # connection + acceleration (persistent)
-ps5buddy invite [--authkey KEY]      # code for the friend's app
-sudo ps5buddy watch                  # live autorate + friend tier
-ps5buddy status | sudo ps5buddy off
+ps5u-buddy check                 # connection report + what to fix
+ps5u-buddy tailscale-on          # turn on PS5Upload's Tailscale, prints the sign-in link
+ps5u-buddy set --upload 38       # house upload in Mbps (the PS5's stream ceiling)
+ps5u-buddy play                  # best quality + adaptive step-down
+ps5u-buddy invite                # PS5B2: code for a friend's PS5 Buddy
 ```
 
-## Tailscale policy
+## Notes
 
-`tailnet-policy-snippet.hujson`: friend devices (`tag:buddy`) may reach only the
-PS5's Remote Play ports. Approve the PS5 route once in the admin console.
-
-## Limits
-
-- One Remote Play stream per PS5: the host plays on the console, the friend streams.
-- Remote Play is a video stream, so game-level rollback netcode isn't possible.
-- Physical distance sets a ping floor; same-city direct links are typically 5–15 ms.
+- You need a jailbroken PS5 with the PS5Upload helper running, paired once in PS5Upload > Play > Set up.
+- **Two ways to play together.** In the first, your friend streams the PS5 while you play on the console itself. In the second, PS5Upload's Play Together lets friends join your stream as Players 2–4.
+- Remote Play is a video stream, so game-level rollback netcode isn't possible. Distance sets a floor on ping. In the same city, a direct link is typically 5–15 ms.
+- `classic/` holds v1 for a stock PS5: a PC subnet-routes the PS5 over system Tailscale to chiaki-ng, with CAKE autorate.
