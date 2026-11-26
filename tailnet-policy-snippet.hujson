@@ -1,0 +1,20 @@
+// Paste into https://login.tailscale.com/admin/acls (merge with what's there).
+// Replace 172.19.168.X with the PS5's IP. Buddy devices get ONLY PS5 Remote Play.
+// NOTE: if your policy still has the default allow-all rule, it overrides this -
+// keep your own devices' rule but make sure it doesn't use "*" as the source.
+{
+  "tagOwners": {
+    "tag:buddy":   ["autogroup:admin"],
+    "tag:ps5host": ["autogroup:admin"]
+  },
+  "autoApprovers": {
+    "routes": { "172.19.168.X/32": ["tag:ps5host"] }
+  },
+  "grants": [
+    // your own devices: everything (as before)
+    { "src": ["autogroup:member"], "dst": ["*"], "ip": ["*"] },
+    // friend: PS5 Remote Play ports + ping, nothing else
+    { "src": ["tag:buddy"], "dst": ["172.19.168.X/32"],
+      "ip": ["tcp:9295-9304", "udp:9295-9304", "icmp:*"] }
+  ]
+}

@@ -1,0 +1,25 @@
+PS5 BUDDY - low-lag PS5 Remote Play with a friend over Tailscale
+=================================================================
+
+INSTALL (once)
+  1. Unzip this folder anywhere.
+  2. Double-click Install.bat and click "Yes".
+     It installs Tailscale + chiaki-ng (PS5 Remote Play) and the PS5 Buddy app
+     (desktop + Start menu), then opens the app.
+
+FRIEND (you play the host's PS5)  -> "Play" tab
+  1. Paste the invite code the host sent you > "Use invite".
+  2. "Connect" (log in if a browser opens) > "Test line".
+  3. Set the shown quality in chiaki-ng > Settings > Video, then "PLAY".
+     First time in chiaki-ng: + > add the PS5 address, Register with the
+     8-digit PIN the host reads from PS5 Settings > System > Remote Play > Link Device.
+  The app keeps watching the line and dings when you should change quality.
+
+HOST (the PS5 is at your house)  -> "Host" tab
+  1. Find PS5   2. Measure upload   3. Share PS5 on Tailscale + Speed boost
+  4. Copy invite (send it to your friend)   5. Watch your friend's line
+
+LEAST LAG: ethernet on the PS5 and both PCs, USB controller, forward UDP 41641
+on the host's router to the host PC.
+
+Remove everything: Uninstall.bat (or Settings > Apps > PS5 Buddy)
