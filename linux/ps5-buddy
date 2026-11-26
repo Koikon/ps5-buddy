@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# PS5 Buddy for Linux: starts PS5Upload if needed, then a simple menu over ps5u-buddy.
+set -uo pipefail
+
+APP_DIR="$(dirname "$(readlink -f "$0")")"
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}/ps5buddy/linux.conf"
+ENGINE="${PS5UPLOAD_ENGINE:-http://127.0.0.1:19113}"
+CLI="$APP_DIR/ps5u_buddy.py"
+REPO="Koikon/ps5-buddy"
+
+# GUI (GTK4 + libadwaita) when the desktop has it; `ps5-buddy --menu` forces the terminal menu
+if [ "${1:-}" != "--menu" ] && { [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; } \
+   && [ -f "$APP_DIR/ps5_buddy_gui.py" ] && python3 -c '
+import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1")
+from gi.repository import Adw; assert (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 5)' 2>/dev/null; then
+  exec python3 "$APP_DIR/ps5_buddy_gui.py"
+fi
+[ "${1:-}" = "--menu" ] && shift
+
+# opened from the app launcher without the GUI: re-open inside a terminal
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+  for t in xdg-terminal-exec ghostty kitty alacritty foot wezterm gnome-terminal konsole xfce4-terminal xterm; do
+    command -v "$t" >/dev/null || continue
+    case "$t" in
+      gnome-terminal) exec "$t" --title="PS5 Buddy" -- "$0" --menu "$@" ;;
+      xdg-terminal-exec) exec "$t" "$0" --menu "$@" ;;
+      *) exec "$t" -e "$0" --menu "$@" ;;
+    esac
+  done
+  command -v notify-send >/dev/null && notify-send "PS5 Buddy" "No terminal found - run ps5-buddy from a terminal."
+  exit 1
+fi
+
+conf() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -1; }
+engine_up() { curl -fsS -m 2 "$ENGINE/api/tailnet" >/dev/null 2>&1; }
+
+start_ps5upload() {
+  [ "${1:-}" = --show ] || { engine_up && return 0; }
+  local up; up=$(conf PS5UPLOAD)
+  if [ -z "$up" ] || [ ! -x "$up" ]; then
+    echo "PS5Upload not found - run the PS5 Buddy installer again."; return 1
+  fi
+  engine_up && { setsid "$up" >/dev/null 2>&1 & return 0; }   # just bring the window up
+  echo "Starting PS5Upload..."
+  if [ "$(conf EXTRACT)" = 1 ]; then
+    APPIMAGE_EXTRACT_AND_RUN=1 setsid "$up" >/dev/null 2>&1 &
+  else
+    setsid "$up" >/dev/null 2>&1 &
+  fi
+  for _ in $(seq 1 60); do engine_up && { echo "PS5Upload is up."; return 0; }; sleep 1; done
+  echo "PS5Upload didn't start its engine within 60 s - open it by hand and choose Check again."
+  return 1
+}
+
+update() {
+  local cur latest
+  cur=$(cat "$APP_DIR/VERSION" 2>/dev/null || echo 0)
+  latest=$(curl -fsSL -m 10 -H 'User-Agent: ps5-buddy' "https://api.github.com/repos/$REPO/releases/latest" \
+    | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].lstrip("v"))' 2>/dev/null) \
+    || { echo "Can't reach GitHub right now."; return; }
+  if [ "$cur" = "$latest" ]; then echo "PS5 Buddy $cur is the latest."; return; fi
+  read -rp "PS5 Buddy $latest is out (you have $cur). Install it now? [Y/n] " yn
+  case "${yn:-y}" in [Yy]*) ;; *) return ;; esac
+  local s; s=$(mktemp -d)
+  curl -fsSL "https://github.com/$REPO/releases/latest/download/install-linux.sh" -o "$s/install.sh" \
+    && bash "$s/install.sh" --no-launch && { rm -rf "$s"; echo "Updated - restarting..."; exec "$APP_DIR/ps5-buddy" --menu; }
+  rm -rf "$s"; echo "Update failed - PS5 Buddy $cur is still installed."
+}
+
+pause() { read -rp $'\nPress Enter to go back...' _; }
+
+clear 2>/dev/null
+echo "PS5 Buddy $(cat "$APP_DIR/VERSION" 2>/dev/null) - PS5Upload + Tailscale"
+start_ps5upload
+while :; do
+  echo
+  echo "  1) Check connection        5) Make an invite code (host)"
+  echo "  2) Turn on Tailscale       6) Set house upload (Mbps)"
+  echo "  3) PLAY (best quality)     7) Check for updates"
+  echo "  4) PLAY, fixed quality     8) Open PS5Upload"
+  echo "  9) Invite for a friend with plain PS5Upload (link + no-lag settings)"
+  echo "  t) Tailscale type: PS5Upload built-in / normal Tailscale app"
+  echo "  q) Quit"
+  read -rp "> " c || exit 0
+  case "$c" in
+    1) start_ps5upload && python3 "$CLI" check; pause ;;
+    2) start_ps5upload && python3 "$CLI" tailscale-on; pause ;;
+    3) start_ps5upload && python3 "$CLI" play; pause ;;
+    4) start_ps5upload && python3 "$CLI" play --no-adapt; pause ;;
+    5) start_ps5upload && python3 "$CLI" invite; pause ;;
+    6) read -rp "House upload in Mbps (speed test 'upload' number): " m
+       [[ "$m" =~ ^[0-9]+([.][0-9]+)?$ ]] && python3 "$CLI" set --upload "$m" || echo "Not a number."; pause ;;
+    7) update; pause ;;
+    8) start_ps5upload --show ;;
+    9) start_ps5upload && python3 "$CLI" normal-invite; pause ;;
+    t|T) read -rp "1 = PS5Upload built-in Tailscale, 2 = normal Tailscale app: " m
+       case "$m" in 1) start_ps5upload && python3 "$CLI" tailscale-mode builtin ;;
+                    2) start_ps5upload && python3 "$CLI" tailscale-mode system ;; *) echo "Pick 1 or 2." ;; esac; pause ;;
+    q|Q) exit 0 ;;
+    *) ;;
+  esac
+done

@@ -8,9 +8,9 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Net.Http
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ErrorActionPreference = 'Continue'
 
-$Version = '2.1.0'                       # bump this for every release (release.sh checks it)
+$Version = '2.2.0'                       # bump this for every release (release.sh checks it)
 $UpdateRepo = 'Koikon/ps5-buddy'
-$AppDir  = Join-Path $env:LOCALAPPDATA 'PS5Buddy'
+$AppDir  = if ($PSScriptRoot) { $PSScriptRoot } else { Join-Path $env:LOCALAPPDATA 'PS5Buddy' }
 $SetFile = Join-Path $AppDir 'settings.json'
 $Engine  = 'http://127.0.0.1:19113'
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
@@ -19,6 +19,8 @@ New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
 $script:S = @{ ps5=''; upload_mbps=0; ps5upload_exe='' ; auto_lower=$true }
 if (Test-Path $SetFile) { try { $j = Get-Content $SetFile -Raw | ConvertFrom-Json
   foreach ($p in $j.PSObject.Properties) { $script:S[$p.Name] = $p.Value } } catch {} }
+function To-Num([string]$s) { $v = 0.0; $s = ([string]$s).Trim().Replace(',', '.')
+  if ([double]::TryParse($s, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $v }; return 0.0 }
 function Save-Settings { $script:S | ConvertTo-Json | Set-Content $SetFile }
 if ($env:PS5UPLOAD_ENGINE) { $Engine = $env:PS5UPLOAD_ENGINE }
 
@@ -43,8 +45,14 @@ function Api([string]$method, [string]$path, $body = $null, [int]$timeoutSec = 2
     $r = $t.Result; $txt = $r.Content.ReadAsStringAsync().Result
     $o = if ($txt) { try { $txt | ConvertFrom-Json } catch { @{} } } else { @{} }
     if ($o -is [Management.Automation.PSCustomObject]) { $o | Add-Member -NotePropertyName _status -NotePropertyValue ([int]$r.StatusCode) -Force }
-    return $o
+    return ,$o
   } catch { return @{ _status = 0; error = "$_" } }
+}
+# a console list from the engine, whatever shape PowerShell hands it back in
+function As-List($x) {
+  if ($x -eq $null) { return ,@() }
+  if ($x.consoles) { return ,@($x.consoles) }
+  return ,@(@($x) | Where-Object { $_ -ne $null -and ($_.addr -or $_.host -or $_.ip) })
 }
 function Engine-Up { $r = Api 'GET' '/api/tailnet' $null 3; return ($r._status -eq 200) }
 
@@ -57,7 +65,7 @@ $Tiers = @(
   @('SAFE',  1280,  720, 30,  3000, 'h264', 99999, 99999))
 function Tier-Index($name) { for ($i=0; $i -lt $Tiers.Count; $i++) { if ($Tiers[$i][0] -eq $name) { return $i } }; return 0 }
 function Pick-Tier($path, $rtt, $jit, $below = '') {
-  $u = [double]$script:S.upload_mbps; $cap = if ($u -gt 0) { $u * 1000 * 0.6 } else { 999999 }
+  $u = To-Num $script:S.upload_mbps; $cap = if ($u -gt 0) { $u * 1000 * 0.6 } else { 999999 }
   $start = if ($below) { [math]::Min((Tier-Index $below) + 1, $Tiers.Count - 1) } else { 0 }
   if ($rtt -eq $null) { $rtt = 50 }; if ($jit -eq $null) { $jit = 8 }
   for ($i = $start; $i -lt $Tiers.Count; $i++) {
@@ -109,7 +117,12 @@ function T($parent, $text, $x, $y, $w=200) {
   $t.BackColor=$Panel; $t.ForeColor=$Fg; $t.BorderStyle='FixedSingle'; $t.Font=$Font; $parent.Controls.Add($t); return $t
 }
 function Log($msg) { $LogBox.AppendText("[$(Get-Date -Format HH:mm:ss)] $msg`r`n") }
-function Busy([scriptblock]$sb) { $Form.Cursor='WaitCursor'; try { & $sb } catch { Log "error: $_" } finally { $Form.Cursor='Default' } }
+$script:IsBusy = $false
+function Busy([scriptblock]$sb) {
+  if ($script:IsBusy) { Log 'Still working on the last step - one moment.'; return }
+  $script:IsBusy = $true; $Form.Cursor = 'WaitCursor'
+  try { & $sb } catch { Log "error: $_" } finally { $Form.Cursor = 'Default'; $script:IsBusy = $false }
+}
 function Set-Row($lbl, $text, $color) { $lbl.Text = $text; $lbl.ForeColor = $color }
 
 # ---------------------------------------------------------------- window
@@ -133,7 +146,11 @@ $BtnInvite = B $TabPlay 'Use invite' 585 33 140
 
 $RowEngine = L $TabPlay 'PS5Upload: ?' 15 80 520
 $BtnOpen   = B $TabPlay 'Open PS5Upload' 585 75 140 28
-$RowTs     = L $TabPlay 'Tailscale (in PS5Upload): ?' 15 110 520
+$RowTs     = L $TabPlay 'Tailscale: ?' 15 110 375
+$CmbTs = New-Object Windows.Forms.ComboBox; $CmbTs.DropDownStyle = 'DropDownList'; $CmbTs.Location = '395,106'; $CmbTs.Size = '182,26'
+$CmbTs.BackColor = $Panel; $CmbTs.ForeColor = $Fg; $CmbTs.FlatStyle = 'Flat'
+[void]$CmbTs.Items.AddRange(@('PS5Upload built-in', 'Normal Tailscale app')); $CmbTs.SelectedIndex = 0; $TabPlay.Controls.Add($CmbTs)
+$script:TsMode = 'builtin'; $script:TsSync = $false
 $BtnTsOn   = B $TabPlay 'Turn on Tailscale' 585 105 140 28
 $RowPs5    = L $TabPlay 'PS5: ?' 15 140 560
 $RowPath   = L $TabPlay 'Path: ?' 15 165 700
@@ -173,17 +190,22 @@ function Refresh-Rows {
   }
   Set-Row $RowEngine 'PS5Upload: running' $Good
   $tn = Api 'GET' '/api/tailnet'
-  if ($tn.enabled -and $tn.signed_in -and $tn.ip) { Set-Row $RowTs "Tailscale (in PS5Upload): on, this PC $($tn.ip)" $Good }
+  $script:TsMode = if ($tn.backend -eq 'system' -or $tn.system.choice -eq 'system') { 'system' } else { 'builtin' }
+  $script:TsSync = $true; $CmbTs.SelectedIndex = $(if ($script:TsMode -eq 'system') { 1 } else { 0 }); $script:TsSync = $false
+  if ($script:TsMode -eq 'system') {
+    if ($tn.system.detected) { Set-Row $RowTs "Tailscale app: on, this PC $($tn.system.ip)" $Good }
+    else { Set-Row $RowTs 'Tailscale app: not running - press Turn on Tailscale' $Warn }
+  }
+  elseif ($tn.enabled -and $tn.signed_in -and $tn.ip) { Set-Row $RowTs "Tailscale (built-in): on, this PC $($tn.ip)" $Good }
   elseif ($tn.login_url) { Set-Row $RowTs 'Tailscale: waiting for sign-in (browser)' $Warn }
-  else { Set-Row $RowTs 'Tailscale (in PS5Upload): off - press Turn on Tailscale' $Warn }
+  else { Set-Row $RowTs 'Tailscale (built-in): off - press Turn on Tailscale' $Warn }
   if (-not $script:S.ps5) {
-    $cs = Api 'GET' '/api/consoles'
-    $list = @(); if ($cs -is [array]) { $list = $cs } elseif ($cs.consoles) { $list = @($cs.consoles) }
+    $list = As-List (Api 'GET' '/api/consoles')
     foreach ($c in $list) { $a = $c.addr; if (-not $a) { $a = $c.host }; if (-not $a) { $a = $c.ip }; if ($a) { $script:S.ps5 = [string]$a; Save-Settings; break } }
     if (-not $script:S.ps5 -and $tn.consoles) { $k = @($tn.consoles)[0]; $script:S.ps5 = [string]$(if ($k.ip) { $k.ip } else { $k.host }); Save-Settings }
   }
   if ($script:S.ps5) { Set-Row $RowPs5 "PS5: $($script:S.ps5)" $Good } else { Set-Row $RowPs5 'PS5: none yet - use the invite, or PS5Upload > Connection > Add a PS5' $Warn }
-  if ([double]$script:S.upload_mbps -gt 0) { Set-Row $RowUp "House upload: $($script:S.upload_mbps) Mbps -> stream may use up to $([int]([double]$script:S.upload_mbps*600)) kbps" $Fg }
+  if ((To-Num $script:S.upload_mbps) -gt 0) { Set-Row $RowUp "House upload: $($script:S.upload_mbps) Mbps -> stream may use up to $([int]((To-Num $script:S.upload_mbps)*600)) kbps" $Fg }
   else { Set-Row $RowUp 'House upload: unknown (ask the host for the invite code)' $Fg }
   return $true
 }
@@ -214,7 +236,33 @@ $BtnOpen.Add_Click({
   Refresh-Rows | Out-Null
 })
 
+$CmbTs.Add_SelectedIndexChanged({
+  if ($script:TsSync) { return }
+  $mode = if ($CmbTs.SelectedIndex -eq 1) { 'system' } else { 'builtin' }
+  Busy {
+    if (-not (Engine-Up)) { Log 'Open PS5Upload first.'; return }
+    if ($mode -eq 'system') {
+      $tn = Api 'GET' '/api/tailnet'
+      if ($tn.enabled) { Api 'POST' '/api/tailnet' @{ op = 'disable' } 30 | Out-Null }
+      $r = Api 'POST' '/api/tailnet' @{ op = 'system_choice'; choice = 'system' } 30
+      if ($r.error) { Log "Tailscale type: $($r.error)" }
+      elseif ($r.system.detected) { Log 'PS5Upload now uses the normal Tailscale app.' }
+      else { Log 'Set to the normal Tailscale app - it is not running yet. Press Turn on Tailscale to get it.' }
+    } else {
+      $r = Api 'POST' '/api/tailnet' @{ op = 'system_choice'; choice = 'own' } 30
+      if ($r.error) { Log "Tailscale type: $($r.error)" } else { Log 'PS5Upload uses its built-in Tailscale. Press Turn on Tailscale to sign it in.' }
+    }
+  }
+  Refresh-Rows | Out-Null
+})
+
 $BtnTsOn.Add_Click({
+  if ($script:TsMode -eq 'system') {
+    $tn = Api 'GET' '/api/tailnet'
+    if ($tn.system.detected) { Log "Tailscale app is on ($($tn.system.ip))." }
+    else { Log 'Install the Tailscale app and sign in (opening tailscale.com/download).'; Start-Process 'https://tailscale.com/download/windows' }
+    Refresh-Rows | Out-Null; return
+  }
   Busy {
     $r = Api 'POST' '/api/tailnet' @{ op = 'enable' } 30
     if ($r.error) { Log "Tailscale: $($r.error)"; return }
@@ -234,14 +282,14 @@ $BtnInvite.Add_Click({
   if ($c -notmatch '^PS5B2:(.+)$') { Log 'That is not a PS5 Buddy 2 invite code (starts with PS5B2:).'; return }
   try {
     $j = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($matches[1])) | ConvertFrom-Json
-    $script:S.upload_mbps = [double]$j.up
+    $script:S.upload_mbps = To-Num $j.up
     Busy {
       $r = Api 'POST' '/api/tailnet/consoles/add' @{ addr = [string]$j.ps5; name = 'Host PS5' } 20
       if ($r.error) { Log "Add PS5: $($r.error) (turn on Tailscale first, and have the host let you in)"; $script:S.ps5 = [string]$j.ps5 }
       else {
         # use the console-list entry PS5Upload made (its home address when it knows it)
         $script:S.ps5 = [string]$j.ps5
-        $cs = Api 'GET' '/api/consoles'; $list = @(); if ($cs -is [array]) { $list = $cs } elseif ($cs.consoles) { $list = @($cs.consoles) }
+        $list = As-List (Api 'GET' '/api/consoles')
         foreach ($c in $list) { if (($c | ConvertTo-Json -Compress) -match [regex]::Escape([string]$j.ps5)) {
           $a = $c.addr; if (-not $a) { $a = $c.host }; if ($a) { $script:S.ps5 = [string]$a } } }
         Log "PS5 added ($($r.action)): $($script:S.ps5)"
@@ -269,7 +317,16 @@ $BtnTest.Add_Click({
 $script:Playing = $null; $script:LastLoss = $null; $script:BadWin = 0; $script:LastChange = [datetime]::MinValue
 function Start-Tier($t) {
   $body = @{ host = $script:S.ps5; width = $t[1]; height = $t[2]; fps = $t[3]; bitrate_kbps = $t[4]; codec = $t[5]; wait_s = 30; keep_alive_s = 600 }
-  $r = Api 'POST' '/api/ps5/rp/start' $body 45
+  $r = $null
+  for ($try = 1; $try -le 4; $try++) {
+    $r = Api 'POST' '/api/ps5/rp/start' $body 45
+    $c = "$($r.code) $($r.error)"
+    if ($r.ok -or $c -notmatch 'busy') { break }
+    if ($c -match 'busy_other|busy_user') { break }
+    $wait = 8; if ($r.retry_s) { $wait = [math]::Min(30, [int]$r.retry_s + 1) }
+    Log "PS5 still releasing the last stream - retrying in $wait s ($try/4)"
+    $until = (Get-Date).AddSeconds($wait); while ((Get-Date) -lt $until) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+  }
   if ($r.ok) { $script:Playing = @{ tier = $t; session = $r.session }; $script:LastLoss = $null; $script:BadWin = 0; $script:LastChange = Get-Date
                Log "Playing at $(Tier-Text $t) (session $($r.session))"; return $true }
   $why = if ($r.code) { $r.code } elseif ($r.error) { $r.error } else { "status $($r._status)" }
@@ -297,7 +354,7 @@ $ChkAuto.Add_CheckedChanged({ $script:S.auto_lower = $ChkAuto.Checked; Save-Sett
 
 function Watch-Stream {
   if (-not $script:Playing) { return }
-  $sess = Api 'GET' '/api/ps5/rp/session' $null 5
+  $sess = Api 'GET' '/api/ps5/rp/session?passive=1' $null 5
   if (-not $sess.host) { $script:Playing = $null; $LblLive.Text = 'stream ended'; Log 'Stream ended.'; return }
   $live = Api 'GET' "/api/ps5/rp/live/status?addr=$([uri]::EscapeDataString($script:S.ps5))" $null 5
   $loss = $live.losses; $new = 0
@@ -310,32 +367,30 @@ function Watch-Stream {
   if ($script:BadWin -ge 2 -and $ChkAuto.Checked -and $t[0] -ne 'SAFE' -and ((Get-Date) - $script:LastChange).TotalSeconds -gt 60) {
     $m = Stats; $lower = Pick-Tier $script:Path $m.rtt $m.jit $t[0]
     Log "Stuttering -> stepping down to $(Tier-Text $lower)"; [Media.SystemSounds]::Asterisk.Play()
-    Api 'POST' '/api/ps5/rp/stop' @{ host = $script:S.ps5; session = $script:Playing.session } | Out-Null
-    Start-Sleep -Seconds 2
-    if (-not (Start-Tier $lower)) { $script:Playing = $null }
+    $script:IsBusy = $true
+    try {
+      Api 'POST' '/api/ps5/rp/stop' @{ host = $script:S.ps5; session = $script:Playing.session } | Out-Null
+      if (Start-Tier $lower) { Log 'If the picture froze, press Play again in PS5Upload to rejoin.' } else { $script:Playing = $null }
+    } finally { $script:IsBusy = $false }
   }
 }
 
 $BtnBoost.Add_Click({
   Busy {
-    $q = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\QoS'
-    New-Item $q -Force | Out-Null; Set-ItemProperty $q -Name 'Do not use NLA' -Value '1' -Type String
-    foreach ($n in 'PS5Upload.exe','ps5upload-engine.exe') {
-      Remove-NetQosPolicy -Name "PS5Buddy-$n" -Confirm:$false -ErrorAction SilentlyContinue
-      New-NetQosPolicy -Name "PS5Buddy-$n" -AppPathNameMatchCondition $n -DSCPAction 46 -NetworkProfile All -ErrorAction SilentlyContinue | Out-Null
-    }
-    $mm = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile'
-    Set-ItemProperty $mm -Name NetworkThrottlingIndex -Value 0xffffffff -Type DWord
-    Set-ItemProperty $mm -Name SystemResponsiveness -Value 10 -Type DWord
-    cmd /c "powercfg /setactive SCHEME_MIN >nul 2>nul"
-    $e = Find-PS5Upload
-    if ($e) { $eng = Join-Path (Split-Path $e) 'ps5upload-engine.exe'
-      foreach ($p in @($e, $eng)) { if (Test-Path $p) {
-        Remove-NetFirewallRule -DisplayName "PS5 Buddy $(Split-Path $p -Leaf)" -ErrorAction SilentlyContinue
-        New-NetFirewallRule -DisplayName "PS5 Buddy $(Split-Path $p -Leaf)" -Direction Inbound -Program $p -Action Allow | Out-Null } } }
+    $boost = Join-Path $AppDir 'boost.ps1'
+    if (-not (Test-Path $boost)) { Log 'boost.ps1 missing - run Install.bat again.'; return }
+    $e = Find-PS5Upload; if (-not $e) { $e = '' }
+    Log 'Speed boost needs admin once - click Yes on the Windows prompt.'
+    try {
+      $p = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Verb RunAs -PassThru -WindowStyle Hidden `
+             -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$boost`"",'-Exe',"`"$e`""
+      while (-not $p.HasExited) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+      if ($p.ExitCode -eq 0) { Set-Content (Join-Path $AppDir 'boost-applied') (Get-Date)
+        Log 'Speed boost on: PS5Upload traffic top priority (DSCP EF), no network throttling, high-performance power, firewall open for direct Tailscale.' }
+      else { Log "Speed boost failed (code $($p.ExitCode))." }
+    } catch { Log 'Speed boost cancelled (no admin permission).' }
     $wifi = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.NdisPhysicalMedium -eq 9 }
     $wired = Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.NdisPhysicalMedium -eq 14 }
-    Log 'Speed boost on: PS5Upload traffic top priority (DSCP EF), no network throttling, high-performance power, firewall open for direct Tailscale.'
     if ($wifi -and -not $wired) { Log 'You are on Wi-Fi: an ethernet cable is the biggest lag fix on your side.' }
   }
 })
@@ -356,10 +411,13 @@ L $TabHost '3. Invite your friend' 15 210 400 24 11 $true | Out-Null
 $BtnMake = B $TabHost 'Copy invite code' 15 240 180
 L $TabHost 'Also let them in: PS5Upload > Connection > PS5 card > Invite a device.' 205 246 520 | Out-Null
 
-L $TabHost '4. Play Together guests (Player 2-4 from your stream)' 15 290 500 24 11 $true | Out-Null
-$ChkGuests = New-Object Windows.Forms.CheckBox; $ChkGuests.Text='Watch guests'; $ChkGuests.Location='15,320'
+$BtnNormal = B $TabHost 'Friend has plain PS5Upload: copy its invite + no-lag settings' 15 280 460
+$BtnNormalLink = B $TabHost 'Copy link only' 485 280 140
+
+L $TabHost '4. Play Together guests (Player 2-4 from your stream)' 15 330 500 24 11 $true | Out-Null
+$ChkGuests = New-Object Windows.Forms.CheckBox; $ChkGuests.Text='Watch guests'; $ChkGuests.Location='15,360'
 $ChkGuests.ForeColor=$Fg; $ChkGuests.Size='150,24'; $TabHost.Controls.Add($ChkGuests)
-$HostGuests = L $TabHost '' 15 350 710 120
+$HostGuests = L $TabHost '' 15 390 710 80
 
 $BtnHostCheck.Add_Click({
   if (-not (Refresh-Rows)) { Set-Row $HostRowTs 'Open PS5Upload first (Play tab)' $Bad; return }
@@ -383,8 +441,10 @@ $BtnMeas.Add_Click({
       $sw = [Diagnostics.Stopwatch]::StartNew()
       $t = $hc.PostAsync('https://speed.cloudflare.com/__up', (New-Object Net.Http.ByteArrayContent(,$buf)))
       while (-not $t.IsCompleted) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+      if ($t.IsFaulted -or $t.IsCanceled -or -not $t.Result.IsSuccessStatusCode) { Log 'Upload test failed (no internet, or the test server refused).'; continue }
       $mbps = [math]::Round(25000000*8/1e6 / $sw.Elapsed.TotalSeconds, 1); if ($mbps -lt $best) { $best = $mbps }
     }
+    if ($best -eq 99999) { Log 'Could not measure - type your upload in Mbps instead.'; return }
     $HostUp.Text = [string]$best; $script:S.upload_mbps = $best; Save-Settings; Log "Upload: $best Mbps (the PS5 uses this same line)"
   }
 })
@@ -395,10 +455,53 @@ $BtnMake.Add_Click({
   $r = Api 'GET' "/api/ps5/tailnet?addr=$([uri]::EscapeDataString($script:S.ps5))" $null 15
   if ($r.ip) { $target = [string]$r.ip } elseif ($r.name) { $target = [string]$r.name }
   else { Log 'Note: PS5 Tailscale not confirmed - friend may not reach it until it is on.' }
-  $up = 0; [void][double]::TryParse($HostUp.Text, [ref]$up)
+  $up = To-Num $HostUp.Text
   $code = 'PS5B2:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{ v = 2; ps5 = $target; up = $up } | ConvertTo-Json -Compress)))
   [Windows.Forms.Clipboard]::SetText($code); Log "Invite code copied ($target, $up Mbps). Send it to your friend."
 })
+
+# PS5Upload's own "Invite a device" link: ps5upload://console?n=&h=&t=&k= (it only says how to reach
+# the console; the console still asks before a new device gets in). Stream settings live in each
+# PS5Upload app, so the no-lag ones go along as text.
+function Low-Lag-Settings([double]$up) {
+  $cap = if ($up -gt 0) { $up * 1000 * 0.6 } else { 10000 }
+  $kbps = 3000; foreach ($b in 50000,40000,30000,20000,15000,12000,10000,8000,6000,4500,3000) { if ($b -le [math]::Min($cap, 10000)) { $kbps = $b; break } }
+  $res = if ($kbps -ge 8000) { '1080p' } else { '720p' }
+  return [ordered]@{
+    'Low latency' = 'On (smallest sound buffer + shortest picture queue)'
+    'Lower quality on a busy network' = 'On'
+    'Picture' = $res; 'Frame rate' = '60'; 'Bitrate' = "$($kbps/1000) Mbps"
+    'Video format' = 'Auto'; 'Video decoding' = 'Auto' }
+}
+function Normal-Invite([bool]$withSettings) {
+  if (-not (Refresh-Rows)) { Log 'Open PS5Upload first (Play tab).'; return }
+  if (-not $script:S.ps5) { Log 'Add your PS5 in PS5Upload first.'; return }
+  Busy {
+    $a = [uri]::EscapeDataString($script:S.ps5)
+    $id = Api 'GET' "/api/ava1/console?addr=$a" $null 8
+    $pt = Api 'GET' "/api/ps5/tailnet?addr=$a" $null 15
+    $q = @("n=$([uri]::EscapeDataString($(if ($id.name) { [string]$id.name } else { 'PS5' })))")
+    $isTs = ([string]$script:S.ps5) -like '100.*'
+    if (-not $isTs) { $q += "h=$a" }
+    if ($pt.ip) { $q += "t=$([uri]::EscapeDataString([string]$pt.ip))" } elseif ($isTs) { $q += "t=$a" }
+    if ($id.key -and ([string]$id.key) -match '^[0-9a-fA-F]{64}$') { $q += "k=$(([string]$id.key).ToLower())" }
+    $link = 'ps5upload://console?' + ($q -join '&')
+    $text = $link
+    if ($withSettings) {
+      $lines = @('PS5 invite (open it, or paste it in PS5Upload > Connection > Add a PS5):', $link, '', 'No-lag settings for PS5Upload > Play > Settings:')
+      $set = Low-Lag-Settings (To-Num $HostUp.Text)
+      foreach ($k in $set.Keys) { $lines += "  ${k}: $($set[$k])" }
+      $lines += '', 'Also: plug your PC into ethernet if you can, and turn on Tailscale in PS5Upload > Settings > Tailscale', '(or the Tailscale app) signed in to the tailnet I invite you to.'
+      $text = $lines -join "`r`n"
+    }
+    [Windows.Forms.Clipboard]::SetText($text)
+    Log $(if ($withSettings) { 'PS5Upload invite + no-lag settings copied. Send it to your friend.' } else { "PS5Upload invite link copied: $link" })
+    if (-not $pt.ip) { Log 'Note: your PS5 is not on Tailscale yet, so the link only works on your home network.' }
+    Log 'When they open it, let them in: PS5Upload > Connection > the PS5 card > Invite a device.'
+  }
+}
+$BtnNormal.Add_Click({ Normal-Invite $true })
+$BtnNormalLink.Add_Click({ Normal-Invite $false })
 
 function Watch-Guests {
   $j = Api 'GET' "/api/join?addr=$([uri]::EscapeDataString($script:S.ps5))" $null 5
@@ -465,8 +568,9 @@ function Install-Update($rel, [string]$latest) {
     $setupDir = $src.DirectoryName
     # keep a backup so a bad update can be rolled back by hand
     $bak = Join-Path $AppDir 'previous'; New-Item -ItemType Directory -Force -Path $bak | Out-Null
-    foreach ($f in 'gui.ps1','uninstall.ps1') { if (Test-Path (Join-Path $AppDir $f)) { Copy-Item (Join-Path $AppDir $f) $bak -Force } }
-    foreach ($f in 'gui.ps1','uninstall.ps1') { if (Test-Path (Join-Path $setupDir $f)) { Copy-Item (Join-Path $setupDir $f) $AppDir -Force } }
+    $files = 'gui.ps1','uninstall.ps1','boost.ps1'
+    foreach ($f in $files) { if (Test-Path (Join-Path $AppDir $f)) { Copy-Item (Join-Path $AppDir $f) $bak -Force } }
+    foreach ($f in $files) { if (Test-Path (Join-Path $setupDir $f)) { Copy-Item (Join-Path $setupDir $f) $AppDir -Force } }
     # optional one-time step a release can ship (new shortcuts, settings migration, ...)
     $post = Join-Path $setupDir 'post-update.ps1'
     if (Test-Path $post) { Log 'Running update step...'; & powershell -NoProfile -ExecutionPolicy Bypass -File $post -AppDir $AppDir | Out-Null }
@@ -474,7 +578,7 @@ function Install-Update($rel, [string]$latest) {
     $script:S.skip_version = ''; Save-Settings
     Log "Updated to $latest - restarting."
     Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',"`"$AppDir\gui.ps1`""
-    $Form.Close()
+    $script:Restarting = $true; $Form.Close()
   }
 }
 $BtnUpdate = B $TabPlay 'Check for updates' 585 445 140 28
@@ -482,12 +586,17 @@ $BtnUpdate.Add_Click({ Check-Update $true })
 
 # ---------------------------------------------------------------- timer
 $Timer = New-Object Windows.Forms.Timer; $Timer.Interval = 2000; $script:Tick = 0
+$script:InTick = $false
 $Timer.Add_Tick({
+  if ($script:InTick -or $script:IsBusy) { return }
+  $script:InTick = $true
+  try {
   $script:Tick++
   if ($Tabs.SelectedTab -eq $TabPlay -and $script:S.ps5 -and ($script:Tick % 2 -eq 0)) { Sample; Show-Line | Out-Null }
   if ($script:Playing -and ($script:Tick % 5 -eq 0)) { Watch-Stream }
   if ($Tabs.SelectedTab -eq $TabHost -and $ChkGuests.Checked -and ($script:Tick % 2 -eq 0)) { Watch-Guests }
   if ($script:Tick % 15 -eq 0) { Refresh-Rows | Out-Null }
+  } finally { $script:InTick = $false }
 })
 $Form.Add_Shown({
   if (-not (Engine-Up)) { $e = Find-PS5Upload; if ($e) { Start-Process $e | Out-Null; Log 'Starting PS5Upload...' } }

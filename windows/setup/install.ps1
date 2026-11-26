@@ -50,13 +50,17 @@ else {
 
 # ---------- 2. PS5 Buddy app ----------
 Step 'Installing PS5 Buddy'
-foreach ($f in 'gui.ps1','uninstall.ps1') { Copy-Item (Join-Path $here $f) $appDir -Force }
-@{ ps5=''; upload_mbps=0; ps5upload_exe=$exe.FullName; auto_lower=$true } | ConvertTo-Json | Set-Content (Join-Path $appDir 'settings.json')
-Set-Content (Join-Path $appDir 'uninstall.cmd') -Encoding Ascii -Value @(
-  '@echo off', 'net session >nul 2>&1 || (powershell -NoProfile -Command "Start-Process -FilePath ''%~f0'' -Verb RunAs" & exit /b)',
-  'copy /y "%~dp0uninstall.ps1" "%TEMP%\ps5buddy-uninstall.ps1" >nul',
-  'powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\ps5buddy-uninstall.ps1"', 'pause')
-function New-AdminShortcut($path) {
+foreach ($f in 'gui.ps1','uninstall.ps1','boost.ps1') { Copy-Item (Join-Path $here $f) $appDir -Force }
+Remove-Item (Join-Path $appDir 'uninstall.cmd') -ErrorAction SilentlyContinue
+# keep the friend's saved PS5 / upload when reinstalling; only refresh the PS5Upload path
+$setFile = Join-Path $appDir 'settings.json'
+$set = @{ ps5=''; upload_mbps=0; auto_lower=$true }
+if (Test-Path $setFile) { try { $old = Get-Content $setFile -Raw | ConvertFrom-Json
+  foreach ($p in $old.PSObject.Properties) { $set[$p.Name] = $p.Value } } catch {} }
+$set.ps5upload_exe = $exe.FullName
+$set | ConvertTo-Json | Set-Content $setFile
+function New-AppShortcut($path) {
+  Remove-Item $path -Force -ErrorAction SilentlyContinue   # drop an old run-as-admin shortcut (2.1.0)
   $ws = New-Object -ComObject WScript.Shell
   $lnk = $ws.CreateShortcut($path)
   $lnk.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -64,12 +68,10 @@ function New-AdminShortcut($path) {
   $lnk.IconLocation = $exe.FullName
   $lnk.WorkingDirectory = $appDir
   $lnk.Description = 'PS5 Buddy - low-lag PS5Upload Play over Tailscale'
-  $lnk.Save()
-  # "Run as administrator" flag (byte 0x15, bit 0x20): Speed boost needs it
-  $b = [IO.File]::ReadAllBytes($path); $b[0x15] = $b[0x15] -bor 0x20; [IO.File]::WriteAllBytes($path, $b)
+  $lnk.Save()   # normal shortcut: only the Speed boost button asks for admin
 }
-New-AdminShortcut (Join-Path ([Environment]::GetFolderPath('Desktop')) 'PS5 Buddy.lnk')
-New-AdminShortcut (Join-Path ([Environment]::GetFolderPath('Programs')) 'PS5 Buddy.lnk')
+New-AppShortcut (Join-Path ([Environment]::GetFolderPath('Desktop')) 'PS5 Buddy.lnk')
+New-AppShortcut (Join-Path ([Environment]::GetFolderPath('Programs')) 'PS5 Buddy.lnk')
 $u = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PS5Buddy'
 New-Item $u -Force | Out-Null
 Set-ItemProperty $u -Name DisplayName -Value 'PS5 Buddy'
@@ -78,7 +80,7 @@ if ($m) { $ver = $m.Matches[0].Groups[1].Value }
 Set-ItemProperty $u -Name DisplayVersion -Value $ver
 Set-ItemProperty $u -Name Publisher -Value 'PS5 Buddy'
 Set-ItemProperty $u -Name DisplayIcon -Value $exe.FullName
-Set-ItemProperty $u -Name UninstallString -Value "`"$appDir\uninstall.cmd`""
+Set-ItemProperty $u -Name UninstallString -Value "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command `"Copy-Item '$appDir\uninstall.ps1' `$env:TEMP\ps5buddy-uninstall.ps1 -Force; & `$env:TEMP\ps5buddy-uninstall.ps1 -AppDir '$appDir'`""
 Ok 'Desktop + Start menu shortcuts made.'
 
 Write-Host ''

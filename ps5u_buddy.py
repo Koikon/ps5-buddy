@@ -16,6 +16,11 @@ from the PS5's upload to the player. This tool drives the local PS5Upload engine
   ps5u-buddy check  [--ps5 ADDR]
   ps5u-buddy play   [--ps5 ADDR] [--upload MBPS] [--no-adapt]
   ps5u-buddy invite [--ps5 ADDR] [--upload MBPS]
+  ps5u-buddy normal-invite [--ps5 ADDR] [--upload MBPS]
+          ps5upload://console link for a friend with plain PS5Upload (no PS5 Buddy),
+          plus the no-lag settings to set in their PS5Upload > Play > Settings
+  ps5u-buddy tailscale-mode builtin|system
+          builtin = PS5Upload's own Tailscale; system = the normal Tailscale app
 """
 import argparse, base64, json, os, statistics, sys, time, urllib.request, urllib.error
 
@@ -120,6 +125,66 @@ def describe(t):
 
 
 # ---------------------------------------------------------------- commands
+# ---------------------------------------------------------------- normal PS5Upload invite
+# PS5Upload's own "Invite a device" link (client/src/screens/Connection/consoles/model.ts):
+# ps5upload://console?n=<name>&h=<home addr>&t=<tailscale addr>&k=<AVA1 key hex>. It only says
+# how to reach the console; the console still asks before a new device gets in. Stream settings
+# live in each PS5Upload app (Play > Settings), so they travel as text next to the link.
+RP_BITRATES = [50000, 40000, 30000, 20000, 15000, 12000, 10000, 8000, 6000, 4500, 3000]
+
+def low_lag_settings(upload_mbps):
+    """The PS5Upload Play > Settings a friend should pick for the least lag on this host's line."""
+    cap = upload_mbps * 1000 * UPLOAD_SHARE if upload_mbps else 10000
+    kbps = next((b for b in RP_BITRATES if b <= min(cap, 10000)), 3000)  # 10 Mbps holds best over the internet
+    hd = kbps >= 8000
+    return {   # labels as PS5Upload shows them in Play > Settings
+        "Low latency": "On (smallest sound buffer + shortest picture queue)",
+        "Lower quality on a busy network": "On",
+        "Picture": "1080p" if hd else "720p",
+        "Frame rate": "60",
+        "Bitrate": f"{kbps / 1000:g} Mbps",
+        "Video format": "Auto",
+        "Video decoding": "Auto",
+    }
+
+def normal_invite(ps5, upload_mbps):
+    """-> (ps5upload://console link, message with the no-lag settings, tailnet ip or None)"""
+    from urllib.parse import urlencode, quote
+    s, ident = api("GET", f"/api/ava1/console?addr={quote(ps5, safe='')}", timeout=8)
+    s, pt = api("GET", f"/api/ps5/tailnet?addr={quote(ps5, safe='')}", timeout=15)
+    tip = pt.get("ip") or None
+    q = {"n": (ident.get("name") or "PS5")[:64]}
+    if not str(ps5).startswith("100."): q["h"] = ps5
+    if tip: q["t"] = tip
+    elif str(ps5).startswith("100."): q["t"] = ps5
+    key = str(ident.get("key") or "").lower()
+    if len(key) == 64: q["k"] = key
+    link = "ps5upload://console?" + urlencode(q)
+    lines = ["PS5 invite (open it, or paste it in PS5Upload > Connection > Add a PS5):", link, "",
+             "No-lag settings for PS5Upload > Play > Settings:"]
+    lines += [f"  {k}: {v}" for k, v in low_lag_settings(upload_mbps).items()]
+    lines += ["", "Also: plug your PC into ethernet if you can, and turn on Tailscale in",
+              "PS5Upload > Settings > Tailscale (or the Tailscale app) signed in to the tailnet I invite you to."]
+    return link, "\n".join(lines), tip
+
+def set_tailscale_mode(mode):
+    """builtin: PS5Upload signs in as its own Tailscale device. system: it uses the normal
+    Tailscale app on this computer (that app must be installed and signed in)."""
+    if mode == "system":
+        s, tn = api("GET", "/api/tailnet")
+        if tn.get("enabled"):
+            api("POST", "/api/tailnet", {"op": "disable"}, timeout=30)
+        s, d = api("POST", "/api/tailnet", {"op": "system_choice", "choice": "system"}, timeout=30)
+    else:
+        s, d = api("POST", "/api/tailnet", {"op": "system_choice", "choice": "own"}, timeout=30)
+    return s, d
+
+def tailscale_mode(tn):
+    """-> 'builtin' | 'system' as chosen (backend says what is in use now)."""
+    if tn.get("backend") == "system" or (tn.get("system") or {}).get("choice") == "system":
+        return "system"
+    return "builtin"
+
 def need_engine():
     if not engine_up():
         sys.exit(f"PS5Upload isn't running (no engine at {ENGINE}). Open the PS5Upload app first.")
@@ -157,6 +222,12 @@ def cmd_check(a):
 
 def cmd_tailscale_on(a):
     need_engine()
+    s, tn = api("GET", "/api/tailnet")
+    if tailscale_mode(tn) == "system":
+        sysd = tn.get("system") or {}
+        print("Mode is the normal Tailscale app: " + (f"on, {sysd.get('ip')}" if sysd.get("detected")
+              else "not running - install/sign in from https://tailscale.com/download"))
+        return
     s, d = api("POST", "/api/tailnet", {"op": "enable", **({"authkey": a.authkey} if a.authkey else {})})
     print("enable:", s, d.get("error", "ok"))
     for _ in range(30):
@@ -189,9 +260,17 @@ def cmd_play(a):
 
 def start(ps5, t, wait=30):
     name, w, h, fps, kbps, codec, *_ = t
-    return api("POST", "/api/ps5/rp/start",
-               {"host": ps5, "width": w, "height": h, "fps": fps, "bitrate_kbps": kbps,
-                "codec": codec, "wait_s": wait, "keep_alive_s": 600}, timeout=wait + 10)
+    body = {"host": ps5, "width": w, "height": h, "fps": fps, "bitrate_kbps": kbps,
+            "codec": codec, "wait_s": wait, "keep_alive_s": 600}
+    for attempt in range(1, 5):
+        s, d = api("POST", "/api/ps5/rp/start", body, timeout=wait + 10)
+        why = f"{d.get('code', '')} {d.get('error', '')}"
+        if d.get("ok") or "busy" not in why or "busy_other" in why or "busy_user" in why:
+            return s, d
+        pause = min(30, int(d.get("retry_s") or 7) + 1)
+        print(f"  PS5 still releasing the last stream - retrying in {pause} s ({attempt}/4)")
+        time.sleep(pause)
+    return s, d
 
 def adapt(ps5, t, session, m, up):
     """Watch the running stream. If it keeps losing packets (2 windows of 10 s in a
@@ -202,7 +281,7 @@ def adapt(ps5, t, session, m, up):
     try:
         while True:
             time.sleep(10)
-            s, sess = api("GET", "/api/ps5/rp/session")
+            s, sess = api("GET", "/api/ps5/rp/session?passive=1")
             if not sess.get("host"):
                 print("stream ended."); return
             s, live = api("GET", f"/api/ps5/rp/live/status?addr={ps5}")
@@ -233,16 +312,46 @@ def adapt(ps5, t, session, m, up):
 def cmd_invite(a):
     need_engine()
     ps5 = pick_console(a.ps5)
+    if not ps5: sys.exit("no PS5 in PS5Upload - add it first (ps5u-buddy check)")
     s, tn = api("GET", "/api/tailnet")
     tip = ps5
+    s, pt = api("GET", f"/api/ps5/tailnet?addr={ps5}", timeout=15)
+    if pt.get("ip"): tip = pt["ip"]
     for k in tn.get("consoles", []):
         if ps5 in (k.get("host"), k.get("ip"), k.get("name")):
-            tip = k.get("name") or k.get("ip") or ps5
+            tip = k.get("ip") or k.get("name") or tip
     up = a.upload or load_conf().get("upload_mbps") or 0
     j = json.dumps({"v": 2, "ps5": tip, "up": float(up)}, separators=(",", ":"))
     print("PS5B2:" + base64.b64encode(j.encode()).decode())
     print("Also: PS5Upload > Connection > the PS5's card > Invite a device, so your friend is let in.",
           file=sys.stderr)
+
+def cmd_normal_invite(a):
+    need_engine()
+    ps5 = pick_console(a.ps5)
+    if not ps5: sys.exit("no PS5 in PS5Upload - add it first (ps5u-buddy check)")
+    up = a.upload or load_conf().get("upload_mbps") or 0
+    link, msg, tip = normal_invite(ps5, float(up))
+    print(msg)
+    if not tip:
+        print("\nNote: the PS5 isn't on Tailscale yet, so this only works on your home network.", file=sys.stderr)
+    print("\nLet them in when they ask: PS5Upload > Connection > the PS5's card > Invite a device.",
+          file=sys.stderr)
+
+def cmd_tailscale_mode(a):
+    need_engine()
+    s, d = set_tailscale_mode(a.mode)
+    if s != 200:
+        sys.exit(f"failed: {d.get('error') or s}")
+    sysd = d.get("system") or {}
+    if a.mode == "system":
+        if sysd.get("detected"):
+            print(f"PS5Upload now uses the normal Tailscale app ({sysd.get('ip') or sysd.get('iface')}).")
+        else:
+            print("Set to the normal Tailscale app, but it isn't running on this computer.\n"
+                  "Install it from https://tailscale.com/download and sign in, then run `ps5u-buddy check`.")
+    else:
+        print("PS5Upload uses its own built-in Tailscale. Turn it on: `ps5u-buddy tailscale-on`.")
 
 def cmd_set(a):
     c = load_conf()
@@ -259,6 +368,10 @@ def main():
         if name in ("play", "invite", "set"): x.add_argument("--upload", type=float)
         if name == "play": x.add_argument("--no-adapt", action="store_true")
     x = sp.add_parser("tailscale-on"); x.set_defaults(f=cmd_tailscale_on); x.add_argument("--authkey")
+    x = sp.add_parser("normal-invite"); x.set_defaults(f=cmd_normal_invite)
+    x.add_argument("--ps5"); x.add_argument("--upload", type=float)
+    x = sp.add_parser("tailscale-mode"); x.set_defaults(f=cmd_tailscale_mode)
+    x.add_argument("mode", choices=["builtin", "system"])
     a = p.parse_args()
     a.f(a)
 

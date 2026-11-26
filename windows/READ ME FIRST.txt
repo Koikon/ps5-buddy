@@ -4,7 +4,7 @@ For a jailbroken PS5 running the PS5Upload helper. The PS5 is on Tailscale
 itself, so the game stream goes straight from the PS5's upload to you.
 
 INSTALL (once)
-  Unzip, double-click Install.bat, click "Yes".
+  Unzip, double-click Install.bat (no admin needed).
   It installs PS5Upload (Tailscale built in) and PS5 Buddy, then opens it.
 
 FRIEND -> "Play" tab
@@ -15,7 +15,7 @@ FRIEND -> "Play" tab
      PS5Upload > Play. "Auto-lower on stutter" steps the quality down by
      itself if the stream keeps losing packets.
   First time only: PS5Upload > Play > Set up (pairing, PIN from the PS5).
-  Speed boost: top priority for PS5Upload's traffic on your PC.
+  Speed boost: top priority for PS5Upload's traffic on your PC (asks for admin once).
 
 HOST -> "Host" tab
   1. Check: PS5 on Tailscale? (PS5Upload > Connection > PS5 card > Put this PS5 on Tailscale)
