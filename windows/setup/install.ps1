@@ -73,7 +73,9 @@ New-AdminShortcut (Join-Path ([Environment]::GetFolderPath('Programs')) 'PS5 Bud
 $u = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PS5Buddy'
 New-Item $u -Force | Out-Null
 Set-ItemProperty $u -Name DisplayName -Value 'PS5 Buddy'
-Set-ItemProperty $u -Name DisplayVersion -Value '2.0.0'
+$ver = '0'; $m = Select-String -Path (Join-Path $here 'gui.ps1') -Pattern '^\$Version = ''([\d.]+)''' | Select-Object -First 1
+if ($m) { $ver = $m.Matches[0].Groups[1].Value }
+Set-ItemProperty $u -Name DisplayVersion -Value $ver
 Set-ItemProperty $u -Name Publisher -Value 'PS5 Buddy'
 Set-ItemProperty $u -Name DisplayIcon -Value $exe.FullName
 Set-ItemProperty $u -Name UninstallString -Value "`"$appDir\uninstall.cmd`""

@@ -23,6 +23,15 @@ with shortcuts on the desktop and in the Start menu. To remove it, use Settings 
 - **Play tab (friend):** Turn on Tailscale → Use invite → Test line → **PLAY**. It shows a live latency graph and has an "Auto-lower on stutter" option.
 - **Host tab:** checks that the PS5 is on Tailscale and whether it's wired, measures your upload, copies the invite code, and shows each Play Together guest's ping.
 
+## Updates
+
+PS5 Buddy checks this repo's latest release each time it opens and asks before installing it. It
+verifies the zip against the `.sha256` file in the same release, replaces only its own files (a
+backup is kept in `%LOCALAPPDATA%\PS5Buddy\previous`), runs `setup/post-update.ps1` if a release
+includes one, and restarts. **Check for updates** checks by hand. PS5Upload updates itself.
+
+To publish an update for everyone: `./release.sh 2.1.1 "what changed"`
+
 ## Linux / macOS: `ps5u_buddy.py`
 
 Uses the same engine API, with no dependencies:

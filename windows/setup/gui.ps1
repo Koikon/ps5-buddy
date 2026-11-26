@@ -8,6 +8,8 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Net.Http
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ErrorActionPreference = 'Continue'
 
+$Version = '2.1.0'                       # bump this for every release (release.sh checks it)
+$UpdateRepo = 'Koikon/ps5-buddy'
 $AppDir  = Join-Path $env:LOCALAPPDATA 'PS5Buddy'
 $SetFile = Join-Path $AppDir 'settings.json'
 $Engine  = 'http://127.0.0.1:19113'
@@ -112,7 +114,7 @@ function Set-Row($lbl, $text, $color) { $lbl.Text = $text; $lbl.ForeColor = $col
 
 # ---------------------------------------------------------------- window
 $Form = New-Object Windows.Forms.Form
-$Form.Text = 'PS5 Buddy 2  (PS5Upload + Tailscale)'; $Form.Size = '780,720'; $Form.BackColor = $Dark; $Form.ForeColor = $Fg
+$Form.Text = "PS5 Buddy $Version  (PS5Upload + Tailscale)"; $Form.Size = '780,720'; $Form.BackColor = $Dark; $Form.ForeColor = $Fg
 $Form.StartPosition = 'CenterScreen'; $Form.FormBorderStyle = 'FixedSingle'; $Form.MaximizeBox = $false; $Form.Font = $Font
 $exe = Find-PS5Upload; if ($exe) { try { $Form.Icon = [Drawing.Icon]::ExtractAssociatedIcon($exe) } catch {} }
 
@@ -150,7 +152,7 @@ $BtnStop  = B $TabPlay 'Stop' 395 400 90 40
 $BtnBoost = B $TabPlay 'Speed boost' 495 400 120 40
 $ChkAuto = New-Object Windows.Forms.CheckBox; $ChkAuto.Text='Auto-lower on stutter'; $ChkAuto.Location='15,448'
 $ChkAuto.Size='220,24'; $ChkAuto.ForeColor=$Fg; $ChkAuto.Checked=[bool]$script:S.auto_lower; $TabPlay.Controls.Add($ChkAuto)
-$LblLive = L $TabPlay '' 240 450 490
+$LblLive = L $TabPlay '' 240 450 335
 
 $Graph.Add_Paint({ param($s,$e)
   $g = $e.Graphics; $g.SmoothingMode = 'AntiAlias'; $vals = @($script:Hist); if ($vals.Count -lt 2) { return }
@@ -409,6 +411,75 @@ function Watch-Guests {
   $HostGuests.Text = if ($lines.Count) { $lines -join "`r`n" } else { 'No guests yet.' }
 }
 
+# ================================================================ AUTO-UPDATE
+# Checks GitHub releases of $UpdateRepo, asks first, verifies the zip's SHA-256 (from the
+# same release), replaces only PS5 Buddy's own files, then restarts. PS5Upload updates itself.
+function Get-Json([string]$url, [int]$timeoutSec = 15) {
+  $hc = New-Object Net.Http.HttpClient; $hc.Timeout = [TimeSpan]::FromSeconds($timeoutSec)
+  $hc.DefaultRequestHeaders.UserAgent.ParseAdd('ps5-buddy-updater')
+  $t = $hc.GetStringAsync($url)
+  while (-not $t.IsCompleted) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 30 }
+  if ($t.IsFaulted) { throw $t.Exception.InnerException }
+  return ($t.Result | ConvertFrom-Json)
+}
+function Get-File([string]$url, [string]$out) {
+  $hc = New-Object Net.Http.HttpClient; $hc.Timeout = [TimeSpan]::FromMinutes(5)
+  $hc.DefaultRequestHeaders.UserAgent.ParseAdd('ps5-buddy-updater')
+  $t = $hc.GetByteArrayAsync($url)
+  while (-not $t.IsCompleted) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 30 }
+  if ($t.IsFaulted) { throw $t.Exception.InnerException }
+  [IO.File]::WriteAllBytes($out, $t.Result)
+}
+function Check-Update([bool]$manual = $false) {
+  try {
+    $rel = Get-Json "https://api.github.com/repos/$UpdateRepo/releases/latest"
+    $latest = ([string]$rel.tag_name).TrimStart('v')
+    $newer = $false; try { $newer = ([version]$latest -gt [version]$Version) } catch {}
+    if (-not $newer) { if ($manual) { Log "PS5 Buddy $Version is up to date." }; return }
+    if (-not $manual -and $script:S.skip_version -eq $latest) { Log "Update $latest skipped (Check for updates to get it)."; return }
+    $notes = [string]$rel.body; if ($notes.Length -gt 700) { $notes = $notes.Substring(0,700) + '...' }
+    $ans = [Windows.Forms.MessageBox]::Show(
+      "PS5 Buddy $latest is available (you have $Version).`r`n`r`n$notes`r`n`r`nInstall it now?`r`n(Yes = install, No = later, Cancel = skip this version)",
+      'PS5 Buddy update', 'YesNoCancel', 'Information')
+    if ($ans -eq 'Cancel') { $script:S.skip_version = $latest; Save-Settings; return }
+    if ($ans -ne 'Yes') { return }
+    Install-Update $rel $latest
+  } catch { if ($manual) { Log "Update check failed: $($_.Exception.Message)" } }
+}
+function Install-Update($rel, [string]$latest) {
+  Busy {
+    $zipA = $rel.assets | Where-Object { $_.name -eq 'PS5-Buddy-Windows.zip' } | Select-Object -First 1
+    $shaA = $rel.assets | Where-Object { $_.name -eq 'PS5-Buddy-Windows.zip.sha256' } | Select-Object -First 1
+    if (-not $zipA -or -not $shaA) { Log 'Update has no zip/checksum - not installing it.'; return }
+    $tmp = Join-Path $env:TEMP "ps5buddy-update-$latest"; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $zip = Join-Path $tmp 'u.zip'; $sha = Join-Path $tmp 'u.sha256'
+    Log "Downloading PS5 Buddy $latest..."
+    Get-File $zipA.browser_download_url $zip; Get-File $shaA.browser_download_url $sha
+    $want = ((Get-Content $sha -Raw).Trim() -split '\s+')[0].ToLower()
+    $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+    if ($want -ne $got) { Log "Checksum mismatch - update NOT installed (expected $want, got $got)."; return }
+    Expand-Archive $zip -DestinationPath $tmp -Force
+    $src = Get-ChildItem $tmp -Recurse -Filter 'gui.ps1' | Select-Object -First 1
+    if (-not $src) { Log 'Update zip has no gui.ps1 - not installing it.'; return }
+    $setupDir = $src.DirectoryName
+    # keep a backup so a bad update can be rolled back by hand
+    $bak = Join-Path $AppDir 'previous'; New-Item -ItemType Directory -Force -Path $bak | Out-Null
+    foreach ($f in 'gui.ps1','uninstall.ps1') { if (Test-Path (Join-Path $AppDir $f)) { Copy-Item (Join-Path $AppDir $f) $bak -Force } }
+    foreach ($f in 'gui.ps1','uninstall.ps1') { if (Test-Path (Join-Path $setupDir $f)) { Copy-Item (Join-Path $setupDir $f) $AppDir -Force } }
+    # optional one-time step a release can ship (new shortcuts, settings migration, ...)
+    $post = Join-Path $setupDir 'post-update.ps1'
+    if (Test-Path $post) { Log 'Running update step...'; & powershell -NoProfile -ExecutionPolicy Bypass -File $post -AppDir $AppDir | Out-Null }
+    Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\PS5Buddy' -Name DisplayVersion -Value $latest -ErrorAction SilentlyContinue
+    $script:S.skip_version = ''; Save-Settings
+    Log "Updated to $latest - restarting."
+    Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File',"`"$AppDir\gui.ps1`""
+    $Form.Close()
+  }
+}
+$BtnUpdate = B $TabPlay 'Check for updates' 585 445 140 28
+$BtnUpdate.Add_Click({ Check-Update $true })
+
 # ---------------------------------------------------------------- timer
 $Timer = New-Object Windows.Forms.Timer; $Timer.Interval = 2000; $script:Tick = 0
 $Timer.Add_Tick({
@@ -422,8 +493,9 @@ $Form.Add_Shown({
   if (-not (Engine-Up)) { $e = Find-PS5Upload; if ($e) { Start-Process $e | Out-Null; Log 'Starting PS5Upload...' } }
   for ($i=0; $i -lt 20 -and -not (Engine-Up); $i++) { [Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 500 }
   Refresh-Rows | Out-Null; Refresh-Link
-  Log 'PS5 Buddy 2 ready. Friend: Turn on Tailscale > Use invite > Test line > PLAY. Host: Host tab.'
+  Log "PS5 Buddy $Version ready. Friend: Turn on Tailscale > Use invite > Test line > PLAY. Host: Host tab."
   $Timer.Start()
+  Check-Update $false
 })
 $Form.Add_FormClosed({ $Timer.Stop() })
 [void]$Form.ShowDialog()
